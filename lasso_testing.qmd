@@ -1,0 +1,239 @@
+---
+title: "MARS via LASSO + GLMnet"
+format: html
+editor: visual
+---
+
+## Packages
+
+```{r}
+library(Rmosek)
+library(regmdc)
+library(earth)
+library(glmnet)
+```
+
+## Dummy Example:
+
+```{r}
+library(regmdc)
+
+fstar <- function(x) {(
+  - max(x[1] - 0.25, 0) - max(x[2] - 0.25, 0)
+  - max(x[1] - 0.25, 0) * max(x[2] - 0.25, 0)
+)}  # the true underlying function
+
+X_design <- cbind(runif(100), runif(100), runif(100))
+colnames(X_design) <- c("VarA", "VarB", "VarC")
+theta <- apply(X_design, MARGIN = 1L, FUN = fstar)  # the values of f* at the design points
+sigma <- 0.1  # standard Gaussian noise
+y <- theta + sigma * rnorm(nrow(X_design))  # an observation vector
+
+# Build a MARS via LASSO model
+mars_model <- regmdc(X_design, y, s = 2L, method = "mars", V = 3.0)
+# mars_model <- regmdc(X_design, y, s = 2L, method = "mars", V = 3.0,
+#                      number_of_bins = 20L)
+# mars_model <- regmdc(X_design, y, s = 2L, method = "mars", V = 3.0,
+#                      number_of_bins = c(10L, 20L, 20L))
+# mars_model <- regmdc(X_design, y, s = 2L, method = "mars", V = 3.0,
+#                      number_of_bins = c(10L, 20L, NA))
+# mars_model <- regmdc(X_design, y, s = 2L, method = "mars", V = 3.0,
+#                      number_of_bins = c(10L, 20L, NA),
+#                      extra_linear_covariates = c("VarC"))
+
+
+# Generate predictions at new data points
+X_pred <- c(1.0/3, 2.0/3, 1.0/3)
+predict_regmdc(mars_model, X_pred)
+
+X_pred <- matrix(c(1.0/3, 2.0/3, 1.0/3, 
+                   2.0/3, 1.0/3, 2.0/3), 
+                 ncol = 3L, byrow = TRUE)
+predict_regmdc(mars_model, X_pred)
+```
+
+## Ozone Example
+
+```{r}
+ozone1
+```
+
+```{r}
+set.seed(123)
+train_proportion <- 0.8
+train_indices <- sample(seq_len(nrow(ozone1)), size = floor(train_proportion * nrow(ozone1)))
+
+train_data <- ozone1[train_indices, ]
+test_data <- ozone1[-train_indices, ]
+```
+
+```{r}
+X_train = subset(train_data, select = -O3)
+y_train = train_data[ , "O3"]
+
+X_test = subset(test_data, select = -O3)
+y_test = test_data[ , "O3"]
+```
+
+## Earth Model
+
+```{r}
+system.time({
+  earth_model = earth(x = X_train, y = y_train, degree = 2)
+})
+```
+
+```{r}
+summary(earth_model)
+```
+
+## Regmdc + Mosek
+
+```{r}
+system.time({
+  mosek_model <- regmdc(X_train, y_train, s = 2L, method = "mars", V = 3.0)
+})
+```
+
+```{r}
+data.frame(mosek_model$coefficients)
+```
+
+## Regmdc + GLMnet
+
+```{r}
+max_values <- apply(X_train, 2, max, na.rm = TRUE)
+min_values <- apply(X_train, 2, min, na.rm = TRUE)
+
+system.time({
+  lasso_output = regmdc:::get_lasso_matrix_tcmars(X_eval = X_train, 
+                                   X_design = X_train, 
+                                   max_vals = max_values, 
+                                   min_vals = min_values,
+                                   s = 2L,
+                                   number_of_bins = NULL,
+                                   concave_covariates = NULL,
+                                   convex_covariates = NULL,
+                                   extra_linear_covariates = NULL
+                                   )
+
+  lasso_mat = lasso_output$lasso_matrix
+  
+  glmnet_model <- glmnet(lasso_mat, y_train, alpha = 1)
+})
+```
+
+```{r}
+# Set of lambda values glmnet fit on
+glmnet_model$lambda
+```
+
+```{r}
+all_coefs <- coef(glmnet_model, s = 0.51885937) # Some arbitrary lambda value
+
+glmnet_coefs <- data.frame(
+  Feature = rownames(all_coefs)[summary(all_coefs)$i],
+  Coefficient = summary(all_coefs)$x
+)
+glmnet_coefs
+```
+
+### Automatic Cross Validation Parameter Search
+
+```{r}
+system.time({
+  cv_glmnet = cv.glmnet(lasso_mat, y_train, alpha = 1)
+  
+  best_lambda = cv_glmnet$lambda.min
+  
+  glment_best_model = glmnet(lasso_mat, y_train, alpha = 1, lambda = best_lambda)
+})
+```
+
+```{r}
+best_lambda
+```
+
+```{r}
+all_coefs_best = coef(glment_best_model, s = "lambda.min")
+
+glmnet_best_coefs <- data.frame(
+  Feature = rownames(all_coefs_best)[summary(all_coefs_best)$i],
+  Coefficient = summary(all_coefs_best)$x
+)
+glmnet_best_coefs
+```
+
+## Comparing Estimates
+
+### Earth
+
+```{r}
+system.time({
+  y_pred_earth = predict(earth_model, X_test)
+})
+```
+
+```{r}
+sqrt(sum((y_pred_earth - y_test)^2))
+```
+
+### Mosek - No CV for reg param
+
+```{r}
+system.time({
+  y_pred_regmdc = predict_regmdc(mosek_model, X_test)
+})
+```
+
+```{r}
+sqrt(sum((y_pred_regmdc - y_test)^2))
+```
+
+### GLMnet - No CV for reg param
+
+```{r}
+system.time({
+  lasso_test_output = regmdc:::get_lasso_matrix_tcmars(X_eval = X_test, 
+                                     X_design = X_train, 
+                                     max_vals = max_values, 
+                                     min_vals = min_values,
+                                     s = 2L,
+                                     number_of_bins = NULL,
+                                     concave_covariates = NULL,
+                                     convex_covariates = NULL,
+                                     extra_linear_covariates = NULL,
+                                     is_included_basis = lasso_output$is_included_basis
+                                     )
+  lasso_test_mat = lasso_test_output$lasso_matrix
+  y_pred_glmnet = predict(glmnet_model, lasso_test_mat, s=0.51885937)
+})
+```
+
+```{r}
+sqrt(sum((y_pred_glmnet - y_test)^2))
+```
+
+### GLMnet - CV for reg param
+
+```{r}
+system.time({
+  lasso_test_output = regmdc:::get_lasso_matrix_tcmars(X_eval = X_test, 
+                                     X_design = X_train, 
+                                     max_vals = max_values, 
+                                     min_vals = min_values,
+                                     s = 2L,
+                                     number_of_bins = NULL,
+                                     concave_covariates = NULL,
+                                     convex_covariates = NULL,
+                                     extra_linear_covariates = NULL,
+                                     is_included_basis = lasso_output$is_included_basis
+                                     )
+  lasso_test_mat = lasso_test_output$lasso_matrix
+  y_pred_glmnet = predict(glment_best_model, lasso_test_mat, s="lambda.min")
+})
+```
+
+```{r}
+sqrt(sum((y_pred_glmnet - y_test)^2))
+```
