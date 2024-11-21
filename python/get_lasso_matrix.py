@@ -1,49 +1,8 @@
 import numpy as np
-import pandas as pd
-import cvxpy as cp
+from compute_elementary_basis import compute_hinge, scale_back_matrix_entry
+from get_unique_column_entries import  get_unique_column_entries
 
 
-def compute_hinge(x):
-    return np.maximum(0, x)
-
-
-def scale_back_matrix_entry(entry, max_val, min_val, digits=4):
-    return format((max_val - min_val) * entry + min_val, f'.{digits}g')
-
-
-def get_unique_column_entries(X_design, method='tcmars', number_of_bins=None):
-    '''
-    Currently only supports tcmars
-    
-    X_design: n x d numPy array or pandas DataFrame containing n datapoints with d features
-    number_of_bins: length d list or numPy array containing bin counts (ints) for each column of X_design
-    
-    More type restrictive than R version 
-        - number_of_bins cannot be an integer, and incorrect lengths of number_of_bins is not handled
-        - if an element of number_of_bins is not an integer, fallback to default behavior (no bins).
-    '''
-    
-    if isinstance(X_design, pd.DataFrame):
-        X_design = X_design.values
-    
-    if method == 'tcmars':
-        if number_of_bins is None:
-            # list comprehension may be inefficient
-            # np.unique sorts by default
-            return [np.unique(np.append(0, X_design[:, i]))[:-1] for i in range(X_design.shape[1])]
-        else:
-            # for loop may be inefficient
-            column_unique = []
-            for i in range(X_design.shape[1]):
-                N = number_of_bins[i]
-                if N is None:
-                    column_unique.append(np.unique(np.append(0, X_design[:, i]))[:-1])
-                else:
-                    column_unique.append(np.array(np.arange(N))/N)
-            return column_unique
-    else:
-        raise ValueError("method must be tcmars")
-    
 
 def get_lasso_matrix_tcmars(X_eval,
                             X_design,
@@ -385,51 +344,3 @@ def get_lasso_matrix_tcmars(X_eval,
         'basis_scale_factors': basis_scale_factors,
         'is_included_basis': is_included_basis
     }
-        
-
-def solve_constrained_lasso(y, M, V=np.inf,
-                            is_sum_constrained_component=None,
-                            is_positive_component=None,
-                            is_negative_component=None):
-    n, p = M.shape
-
-    if is_sum_constrained_component is None:
-        is_sum_constrained_component = np.full(p, True, dtype=bool)
-    if is_positive_component is None:
-        is_positive_component = np.full(p, False, dtype=bool)
-    if is_negative_component is None:
-        is_negative_component = np.full(p, False, dtype=bool)
-
-    # Define cvxpy variable
-    x = cp.Variable(p)
-
-    # Define objective function
-    objective = cp.Minimize(cp.sum_squares(y - M @ x))
-
-    # Begin composing list of constraints
-    constraints = []
-
-    # Sign constraints for x
-    for i in range(p):
-        if is_positive_component[i]:
-            constraints.append(x[i] >= 0)
-        if is_negative_component[i]:
-            constraints.append(x[i] <= 0)
-
-    # Regularization constraint: sum |x_i| <= V if V is finite
-    if np.isfinite(V):
-        indices = np.where(is_sum_constrained_component)[0]
-        constraints.append(cp.norm1(x[indices]) <= V)
-
-    # Create problem
-    prob = cp.Problem(objective, constraints)
-
-    # Solve problem
-    prob.solve(solver=cp.MOSEK)
-
-    if prob.status not in ["optimal", "optimal_inaccurate"]:
-        raise ValueError("Optimization did not converge.")
-
-    x_value = x.value
-
-    return x_value
